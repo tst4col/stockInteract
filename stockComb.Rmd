@@ -1,0 +1,171 @@
+---
+title: Client Side Calculations Based on Graphics Interaction
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo    = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+library(quantmod)
+library(tidyverse)
+library(plotly)
+library(reactable)
+library(sparkline)
+```
+
+## Interactive Stock Price Plot
+
+This graph displays the development of some adjusted stock prices. 
+Note that you can toggle the visibility of the ``code chunks`` that generate the data and visualization.
+
+```{r stockPrices}
+# Get Adjusted Stock Prices and
+symbols <- c("AAPL", "MSFT", "SPY")
+invisible(quantmod::getSymbols(symbols, 
+                     from = "2021-11-30", to = "2021-12-31",
+                     auto.assign = TRUE, warnings = FALSE))
+
+prices_xts <- 
+  xts::merge.xts(AAPL$AAPL.Adjusted, MSFT$MSFT.Adjusted, SPY$SPY.Adjusted)
+
+## export csv for separate upload
+# zoo::write.zoo(prices_xts, 
+#           file = file.path("H:", "Temp", "prices.csv"),
+#           quote = FALSE, sep = ",")
+
+prices_long <- 
+  prices_xts %>% 
+  tibble::as_tibble(rownames = "date") %>% 
+  dplyr::rename(Apple = AAPL.Adjusted, Microsoft = MSFT.Adjusted, SandP500 = SPY.Adjusted) %>% 
+  dplyr::mutate(date = as.Date(date)) %>% 
+  tidyr::gather(key = "asset", value = "idx", -date) %>% 
+  dplyr::group_by(asset) %>% 
+  dplyr::arrange(asset, date) 
+
+plt_prices <- 
+  plot_ly(prices_long, x = ~date, y = ~idx, color = ~asset,
+          type = "scatter", mode = "lines") 
+
+plt_prices
+```
+
+Note the interactivity of the plot. 
+In particular the time series to be displayed can be selected by clicking on the corresponding entry in the legend. 
+One can also zoom in and out via the ``navigation bar`` or by clicking and dragging horizontally.
+The full period is restored by double-clicking into the plot or pressing ``auto-scale`` in the navigation bar.
+
+## Corresponding Stock Return Summary Table
+
+The following table displays some summary statistics and visuatization of the distribution for all stocks returns over the full time period. 
+
+```{r summaryTable}
+# Return info in long table
+return_long <-
+  prices_long %>% 
+  dplyr::mutate(., sRet = idx / dplyr::lag(idx) - 1)
+
+data <- 
+  return_long %>% 
+  dplyr::select(asset, sRet) %>% 
+  dplyr::group_by(asset) %>% 
+  dplyr::summarize(mean = mean(sRet, na.rm = TRUE), 
+                   sd   = sd(sRet, na.rm = TRUE),
+                   sRet = list(sRet))  %>% 
+  mutate(box = NA, sparkline = NA)
+  
+rtbl_returns <- 
+  reactable(data = dplyr::select(data, 
+                                 asset, mean, sd, box, sparkline), 
+          columns = list(
+            mean = colDef(format = colFormat(percent = TRUE, digits = 3)),
+            sd   = colDef(format = colFormat(percent = TRUE, digits = 3)),
+            box       = colDef(cell = function(value, index) {
+              sparkline(data$sRet[[index]], type = "box")
+            }),
+            sparkline = colDef(cell = function(value, index) {
+              sparkline(data$sRet[[index]])
+            })
+))
+
+rtbl_returns
+```
+
+## Recalculate Summary Table Based on Graphics Interaction <!-- {.tabset} -->
+
+The challange is to recalculate the table such that it 
+
+- only displays the assets selected in the plot,
+- calculates the statistics only for the visible time period,
+- all calculations take place in the browser, no Shiny!
+
+The following plot is without the Microsoft stock and only for the sub period from December 10, 2021 to December 24.
+
+### Filterd Plot
+
+```{r combinedStatic}
+prices_long_filtered <- 
+  prices_long %>% 
+  dplyr::filter(date >= as.Date("2021-12-10") & date <= as.Date("2021-12-24")) %>% 
+  dplyr::filter(asset != "Microsoft")
+
+plt_prices_filtered <- 
+  plot_ly(prices_long_filtered, x = ~date, y = ~idx, color = ~asset,
+          type = "scatter", mode = "lines") 
+plt_prices_filtered
+```
+
+### Desired Table Based on Filter
+
+The desired outcome is a revised table reflecting the user interaction in the plot.
+
+```{r}
+return_long_filtered <-
+  prices_long %>% 
+  dplyr::mutate(., sRet = idx / dplyr::lag(idx) - 1) %>% 
+  dplyr::filter(date >= as.Date("2021-12-10") & date <= as.Date("2021-12-24")) %>% 
+  dplyr::filter(asset != "Microsoft")
+
+data_filtered <- 
+  return_long_filtered %>% 
+  dplyr::select(asset, sRet) %>% 
+  dplyr::group_by(asset) %>% 
+  dplyr::summarize(mean = mean(sRet, na.rm = TRUE), 
+                   sd   = sd(sRet, na.rm = TRUE),
+                   sRet = list(sRet))  %>% 
+  mutate(box = NA, sparkline = NA)
+  
+rtbl_returns_filtered <- 
+  reactable(data = dplyr::select(data_filtered, 
+                                          asset, mean, sd, box, sparkline), 
+          columns = list(
+            mean = colDef(format = colFormat(percent = TRUE, digits = 3)),
+            sd   = colDef(format = colFormat(percent = TRUE, digits = 3)),
+            box       = colDef(cell = function(value, index) {
+              sparkline(data_filtered$sRet[[index]], type = "box")
+            }),
+            sparkline = colDef(cell = function(value, index) {
+              sparkline(data_filtered$sRet[[index]])
+            })
+))
+rtbl_returns_filtered
+```
+
+## Implementation Ideas
+
+The initial focus of this project is to effectively organise the data and do the calculationsin JavaScript
+
+- use some specific data structure and calculation routines from [tidy.js](https://pbeshai.github.io/tidy/), [arquero.js](https://uwdata.github.io/arquero/), [danfo.js](https://danfo.jsdata.org/), or other?
+- Can [Hal9](https://hal9.com/) be an integrating framework?
+- Ideally, only the stock prices data is initially provided - everything else, including returns should be done in the browser.
+- The status of the plotly object can be retrieved with some attributes. The following seem particularly relevant:
+  - The selected starting point of the x-axis in plotly is stored in ``el.layout.xaxis.range[0]``. 
+  - The visibility of a trace can be checked with the attribute [visible](https://plotly.com/javascript/reference/scatter/#scatter-visible).
+- There will be more complex transformations and calculations (regressions, annualalisations).
+
+Eventually, the framework should be an [htmlwidget](http://www.htmlwidgets.org/) R-Package.
+
